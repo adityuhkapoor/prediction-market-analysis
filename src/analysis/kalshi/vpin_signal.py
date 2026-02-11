@@ -22,10 +22,9 @@ import pandas as pd
 from matplotlib.figure import Figure
 from scipy import stats
 
-from src.analysis.util.categories import CATEGORY_SQL, get_group
 from src.analysis.util.vpin import MIN_TRADES, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
-from src.common.interfaces.chart import ChartConfig, ChartType, Series, UnitType, scatter_chart
+from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
 
 
 class VPINSignalAnalysis(Analysis):
@@ -111,9 +110,7 @@ class VPINSignalAnalysis(Analysis):
             """
         ).df()
 
-    def _test_volatility_prediction(
-        self, vpin_df: pd.DataFrame
-    ) -> tuple[dict[str, float], pd.DataFrame]:
+    def _test_volatility_prediction(self, vpin_df: pd.DataFrame) -> tuple[dict[str, float], pd.DataFrame]:
         """Test 1: Does VPIN predict future |price change|?"""
         results = {}
 
@@ -129,16 +126,20 @@ class VPINSignalAnalysis(Analysis):
             slope, intercept, r, p, se = stats.linregress(valid["vpin"], valid[f"abs_change_{k}"])
             results[f"vol_beta_k{k}"] = float(slope)
             results[f"vol_pvalue_k{k}"] = float(p)
-            results[f"vol_r2_k{k}"] = float(r ** 2)
+            results[f"vol_r2_k{k}"] = float(r**2)
 
         # Quintile analysis at k=5
         valid_k5 = vpin_df[["vpin", "abs_change_5"]].dropna()
         valid_k5["quintile"] = pd.qcut(valid_k5["vpin"], 5, labels=False, duplicates="drop") + 1
-        quintiles = valid_k5.groupby("quintile").agg(
-            mean_vpin=("vpin", "mean"),
-            mean_volatility=("abs_change_5", "mean"),
-            n=("vpin", "count"),
-        ).reset_index()
+        quintiles = (
+            valid_k5.groupby("quintile")
+            .agg(
+                mean_vpin=("vpin", "mean"),
+                mean_volatility=("abs_change_5", "mean"),
+                n=("vpin", "count"),
+            )
+            .reset_index()
+        )
 
         return results, quintiles
 
@@ -156,19 +157,21 @@ class VPINSignalAnalysis(Analysis):
             slope, intercept, r, p, se = stats.linregress(valid["signed_flow"], valid[f"future_return_{k}"])
             results[f"dir_beta_k{k}"] = float(slope)
             results[f"dir_pvalue_k{k}"] = float(p)
-            results[f"dir_r2_k{k}"] = float(r ** 2)
+            results[f"dir_r2_k{k}"] = float(r**2)
 
         return results
 
-    def _test_resolution_prediction(
-        self, con: duckdb.DuckDBPyConnection, vpin_df: pd.DataFrame
-    ) -> dict[str, float]:
+    def _test_resolution_prediction(self, con: duckdb.DuckDBPyConnection, vpin_df: pd.DataFrame) -> dict[str, float]:
         """Test 3: Does VPIN at market midpoint predict YES/NO outcome?"""
         # For each market, find the bucket at the 50th percentile of volume
-        market_stats = vpin_df.groupby("ticker").agg(
-            n_buckets=("bucket_id", "count"),
-            median_bucket=("bucket_id", "median"),
-        ).reset_index()
+        market_stats = (
+            vpin_df.groupby("ticker")
+            .agg(
+                n_buckets=("bucket_id", "count"),
+                median_bucket=("bucket_id", "median"),
+            )
+            .reset_index()
+        )
 
         midpoint_rows = []
         for _, row in market_stats.iterrows():

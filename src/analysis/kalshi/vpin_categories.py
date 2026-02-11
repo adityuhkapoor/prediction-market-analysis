@@ -18,7 +18,7 @@ from scipy import stats
 from src.analysis.util.categories import CATEGORY_SQL, GROUP_COLORS, get_group
 from src.analysis.util.vpin import MIN_TRADES, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
-from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
+from src.common.interfaces.chart import ChartConfig, ChartType
 
 
 class VPINCategoriesAnalysis(Analysis):
@@ -95,21 +95,21 @@ class VPINCategoriesAnalysis(Analysis):
         rows = []
         for group in vpin_df["group"].unique():
             gdata = vpin_df[vpin_df["group"] == group]
-            rows.append({
-                "group": group,
-                "mean_vpin": gdata["vpin"].mean(),
-                "median_vpin": gdata["vpin"].median(),
-                "mean_abs_signed_flow": gdata["signed_flow"].abs().mean(),
-                "n_markets": gdata["ticker"].nunique(),
-                "n_buckets": len(gdata),
-            })
+            rows.append(
+                {
+                    "group": group,
+                    "mean_vpin": gdata["vpin"].mean(),
+                    "median_vpin": gdata["vpin"].median(),
+                    "mean_abs_signed_flow": gdata["signed_flow"].abs().mean(),
+                    "n_markets": gdata["ticker"].nunique(),
+                    "n_buckets": len(gdata),
+                }
+            )
 
         df = pd.DataFrame(rows)
         return df[df["n_markets"] >= 5].sort_values("n_buckets", ascending=False)
 
-    def _compute_signal_strength(
-        self, vpin_df: pd.DataFrame, group_df: pd.DataFrame
-    ) -> pd.DataFrame:
+    def _compute_signal_strength(self, vpin_df: pd.DataFrame, group_df: pd.DataFrame) -> pd.DataFrame:
         """Per-category regression: VPIN → future |price change| at k=5."""
         # Compute future volatility
         vpin_df["future_price_5"] = vpin_df.groupby("ticker")["avg_price"].shift(-5)
