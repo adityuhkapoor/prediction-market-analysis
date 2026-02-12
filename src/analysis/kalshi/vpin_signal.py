@@ -3,7 +3,7 @@
 Tests three claims:
 1. VPIN predicts future price volatility (|price change|)
 2. Signed order flow predicts future price direction
-3. VPIN at market midpoint predicts YES/NO resolution
+3. VPIN in first half of market life predicts YES/NO resolution
 
 This is the first application of VPIN to prediction market data. The key
 methodological advantage over equities: exact trade classification via
@@ -21,10 +21,16 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 from scipy import stats
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_predict
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from src.analysis.util.vpin import MIN_TRADES, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
 from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
+
+MIN_MARKETS = 50
 
 
 class VPINSignalAnalysis(Analysis):
@@ -64,7 +70,7 @@ class VPINSignalAnalysis(Analysis):
             results["direction"] = dir_results
 
         with self.progress("Testing resolution prediction"):
-            res_results = self._test_resolution_prediction(con, vpin_df)
+            res_results = self._test_resolution_prediction(vpin_df)
             results["resolution"] = res_results
 
         fig = self._create_figure(vpin_df, vol_quintiles, results)
@@ -161,60 +167,77 @@ class VPINSignalAnalysis(Analysis):
 
         return results
 
-    def _test_resolution_prediction(self, con: duckdb.DuckDBPyConnection, vpin_df: pd.DataFrame) -> dict[str, float]:
-        """Test 3: Does VPIN at market midpoint predict YES/NO outcome?"""
-        # For each market, find the bucket at the 50th percentile of volume
-        market_stats = (
-            vpin_df.groupby("ticker")
-            .agg(
-                n_buckets=("bucket_id", "count"),
-                median_bucket=("bucket_id", "median"),
-            )
-            .reset_index()
+    def _test_resolution_prediction(self, vpin_df: pd.DataFrame) -> dict[str, float]:
+        """Test 3: Does VPIN in the first half of market life predict YES/NO outcome?"""
+        # Truncate to first 50% of each market's volume buckets.
+        # Late-market flow reflects outcome certainty — using it would be tautological.
+        bucket_counts = vpin_df.groupby("ticker")["bucket_id"].transform("count")
+        bucket_rank = vpin_df.groupby("ticker")["bucket_id"].rank(method="first")
+        early_df = vpin_df[bucket_rank <= (bucket_counts / 2)].copy()
+
+        # Price at the cutoff point (last bucket in the early half)
+        cutoff_idx = early_df.groupby("ticker")["bucket_id"].idxmax()
+        cutoff_prices = early_df.loc[cutoff_idx, ["ticker", "avg_price"]].rename(
+            columns={"avg_price": "cutoff_price"}
         )
 
-        midpoint_rows = []
-        for _, row in market_stats.iterrows():
-            ticker = row["ticker"]
-            mid = row["median_bucket"]
-            market_data = vpin_df[vpin_df["ticker"] == ticker]
-            closest_idx = (market_data["bucket_id"] - mid).abs().idxmin()
-            midpoint_rows.append(market_data.loc[closest_idx])
+        market_agg = (
+            early_df.groupby("ticker")
+            .agg(
+                mean_vpin=("vpin", "mean"),
+                mean_signed_flow=("signed_flow", "mean"),
+                mean_price=("avg_price", "mean"),
+                result=("result", "first"),
+            )
+            .reset_index()
+            .merge(cutoff_prices, on="ticker")
+        )
+        market_agg["y"] = (market_agg["result"] == "yes").astype(int)
 
-        midpoints = pd.DataFrame(midpoint_rows)
-        midpoints["y"] = (midpoints["result"] == "yes").astype(float)
-        midpoints["price_prob"] = midpoints["avg_price"] / 100.0
+        features = market_agg[["mean_price", "mean_vpin", "mean_signed_flow"]].values
+        target = market_agg["y"].values
 
-        # Baseline: market price as probability
-        baseline_brier = ((midpoints["price_prob"] - midpoints["y"]) ** 2).mean()
-
-        # Logistic regression: price + vpin + signed_flow
-        from sklearn.linear_model import LogisticRegression
-
-        features = midpoints[["avg_price", "vpin", "signed_flow"]].values
-        target = midpoints["y"].values
-
-        # Handle any NaN/inf
         mask = np.isfinite(features).all(axis=1)
         features = features[mask]
         target = target[mask]
 
-        if len(features) < 50:
-            return {"n_markets": len(features), "baseline_brier": float(baseline_brier)}
+        mean_price_prob = market_agg.loc[mask, "mean_price"].values / 100.0
+        cutoff_price_prob = market_agg.loc[mask, "cutoff_price"].values / 100.0
 
-        model = LogisticRegression(max_iter=1000)
-        model.fit(features, target)
-        model_probs = model.predict_proba(features)[:, 1]
-        model_brier = ((model_probs - target) ** 2).mean()
+        baseline_brier_mean = float(((mean_price_prob - target) ** 2).mean())
+        baseline_brier_cutoff = float(((cutoff_price_prob - target) ** 2).mean())
+
+        if len(features) < MIN_MARKETS:
+            return {"n_markets": len(features), "baseline_brier_mean": baseline_brier_mean}
+
+        pipe = Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(max_iter=1000, solver="lbfgs", random_state=42)),
+        ])
+        model_probs = cross_val_predict(
+            pipe, features, target, cv=5, method="predict_proba"
+        )[:, 1]
+        model_brier = float(((model_probs - target) ** 2).mean())
+
+        # Refit on full data for coefficient extraction
+        pipe.fit(features, target)
+        scaler = pipe.named_steps["scaler"]
+        model = pipe.named_steps["clf"]
 
         return {
             "n_markets": int(len(features)),
-            "baseline_brier": float(baseline_brier),
-            "model_brier": float(model_brier),
-            "brier_improvement_pct": float((baseline_brier - model_brier) / baseline_brier * 100),
-            "coef_price": float(model.coef_[0][0]),
-            "coef_vpin": float(model.coef_[0][1]),
-            "coef_signed_flow": float(model.coef_[0][2]),
+            "baseline_brier_mean": baseline_brier_mean,
+            "baseline_brier_cutoff": baseline_brier_cutoff,
+            "model_brier": model_brier,
+            "brier_skill_vs_mean_pct": float(
+                (baseline_brier_mean - model_brier) / baseline_brier_mean * 100
+            ),
+            "brier_skill_vs_cutoff_pct": float(
+                (baseline_brier_cutoff - model_brier) / baseline_brier_cutoff * 100
+            ),
+            "coef_price": float(model.coef_[0][0] / scaler.scale_[0]),
+            "coef_vpin": float(model.coef_[0][1] / scaler.scale_[1]),
+            "coef_signed_flow": float(model.coef_[0][2] / scaler.scale_[2]),
         }
 
     def _create_figure(
@@ -291,10 +314,12 @@ class VPINSignalAnalysis(Analysis):
                 table_data.append([f"Flow → ΔP (k={k})", f"{beta:.3f}{sig}", f"{r2:.4f}"])
 
         res = results.get("resolution", {})
-        if "brier_improvement_pct" in res:
-            table_data.append(["Brier (market)", f"{res['baseline_brier']:.4f}", ""])
-            table_data.append(["Brier (model)", f"{res['model_brier']:.4f}", ""])
-            table_data.append(["Improvement", f"{res['brier_improvement_pct']:.2f}%", ""])
+        if "brier_skill_vs_mean_pct" in res:
+            table_data.append(["Brier (mean price)", f"{res['baseline_brier_mean']:.4f}", ""])
+            table_data.append(["Brier (cutoff price)", f"{res['baseline_brier_cutoff']:.4f}", ""])
+            table_data.append(["Brier (model CV)", f"{res['model_brier']:.4f}", ""])
+            table_data.append(["Skill vs mean", f"{res['brier_skill_vs_mean_pct']:.1f}%", ""])
+            table_data.append(["Skill vs cutoff", f"{res['brier_skill_vs_cutoff_pct']:.1f}%", ""])
 
         if table_data:
             table = ax.table(
