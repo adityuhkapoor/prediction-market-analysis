@@ -113,8 +113,7 @@ class MispricingModelAnalysis(Analysis):
                 m.result,
                 m.event_ticker,
                 m.close_time,
-                bc.max_bucket,
-                tc.total_contracts
+                bc.max_bucket
             FROM vpin_series vs
             INNER JOIN market_info m ON vs.ticker = m.ticker
             INNER JOIN bucket_counts bc ON vs.ticker = bc.ticker
@@ -136,7 +135,10 @@ class MispricingModelAnalysis(Analysis):
         midpoints["y"] = (midpoints["result"] == "yes").astype(int)
         midpoints["price"] = midpoints["avg_price"]
         midpoints["group"] = midpoints["event_ticker"].apply(get_group)
-        midpoints["log_volume"] = np.log1p(midpoints["total_contracts"])
+        # Volume observed at midpoint, approximated from bucket geometry.
+        # bucket_id = FLOOR((cum_vol - 1) / bucket_size), so cum_vol at bucket k
+        # is in [(k * bucket_size + 1), (k + 1) * bucket_size].
+        midpoints["log_volume"] = np.log1p((midpoints["bucket_id"] + 1) * self.bucket_size)
 
         # Days to close
         midpoints["bucket_end"] = pd.to_datetime(midpoints["bucket_end"])
