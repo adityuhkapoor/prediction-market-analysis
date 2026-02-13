@@ -52,8 +52,8 @@ class KalshiTradesIndexer(Indexer):
                     existing_trade_ids.add(trade_id)
                     existing_tickers.add(ticker)
                 print(f"Found {len(existing_trade_ids)} existing trades")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Warning: failed to load existing trades for dedup: {e}")
 
         all_tickers = duckdb.sql(f"""
             SELECT DISTINCT ticker FROM '{MARKETS_DIR}/markets_*_*.parquet'

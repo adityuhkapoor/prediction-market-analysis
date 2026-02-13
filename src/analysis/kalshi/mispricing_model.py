@@ -26,7 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from src.analysis.util.categories import GROUP_COLORS, get_group
-from src.analysis.util.vpin import MIN_TRADES, vpin_cte
+from src.analysis.util.vpin import qualified_trades_cte, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
 from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
 
@@ -59,6 +59,8 @@ class MispricingModelAnalysis(Analysis):
         with self.progress("Extracting features at market midpoints"):
             features_df = self._extract_features(con)
 
+        self._require_data(features_df, "feature extraction")
+
         with self.progress("Splitting train/test by time"):
             train_df, test_df = self._temporal_split(features_df)
 
@@ -79,23 +81,7 @@ class MispricingModelAnalysis(Analysis):
         # Compute VPIN series, then pick the midpoint bucket per market
         vpin_df = con.execute(
             f"""
-            WITH market_info AS (
-                SELECT ticker, event_ticker, result, close_time
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized' AND result IN ('yes', 'no')
-            ),
-            trade_counts AS (
-                SELECT t.ticker, SUM(t.count) AS total_contracts
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN market_info m ON t.ticker = m.ticker
-                GROUP BY t.ticker
-                HAVING SUM(t.count) >= {MIN_TRADES}
-            ),
-            trades AS (
-                SELECT t.ticker, t.count, t.taker_side, t.yes_price, t.created_time
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN trade_counts tc ON t.ticker = tc.ticker
-            ),
+            WITH {qualified_trades_cte(self.trades_dir, self.markets_dir)},
             {vpin_cte("trades", self.bucket_size, self.lookback)},
             bucket_counts AS (
                 SELECT ticker, MAX(bucket_id) AS max_bucket
@@ -117,13 +103,9 @@ class MispricingModelAnalysis(Analysis):
             FROM vpin_series vs
             INNER JOIN market_info m ON vs.ticker = m.ticker
             INNER JOIN bucket_counts bc ON vs.ticker = bc.ticker
-            INNER JOIN trade_counts tc ON vs.ticker = tc.ticker
             WHERE vs.window_size = {self.lookback}
             """
         ).df()
-
-        if vpin_df.empty:
-            return pd.DataFrame()
 
         # Pick the bucket closest to the midpoint for each market
         vpin_df["mid_target"] = vpin_df["max_bucket"] / 2.0
@@ -157,7 +139,7 @@ class MispricingModelAnalysis(Analysis):
 
     def _compute_longshot_adj(self, train_df: pd.DataFrame, test_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Compute longshot bias adjustment from training data only."""
-        train_df["price_bin"] = pd.cut(train_df["price"], bins=20, labels=False)
+        train_df["price_bin"], bin_edges = pd.cut(train_df["price"], bins=20, labels=False, retbins=True)
         bin_stats = (
             train_df.groupby("price_bin")
             .agg(
@@ -174,7 +156,7 @@ class MispricingModelAnalysis(Analysis):
         train_df["longshot_adj"] = train_df["price_bin"].map(adj_map).fillna(0)
 
         # Map to test using the same bin edges
-        test_df["price_bin"] = pd.cut(test_df["price"], bins=20, labels=False)
+        test_df["price_bin"] = pd.cut(test_df["price"], bins=bin_edges, labels=False)
         test_df["longshot_adj"] = test_df["price_bin"].map(adj_map).fillna(0)
 
         return train_df, test_df

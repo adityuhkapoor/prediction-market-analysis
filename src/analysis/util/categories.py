@@ -570,6 +570,8 @@ SUBCATEGORY_PATTERNS = [
 
 def get_hierarchy(category: str) -> tuple[str, str, str]:
     """Map a category to its (group, category, subcategory) tuple."""
+    if not category:
+        return ("Other", "Other", "")
     cat_upper = category.upper()
     for pattern, group, cat, subcat in SUBCATEGORY_PATTERNS:
         if pattern in cat_upper:

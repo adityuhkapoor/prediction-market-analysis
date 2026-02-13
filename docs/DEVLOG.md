@@ -1,5 +1,169 @@
 # Devlog
 
+## 2026-02-12: Add test suite (22 tests)
+
+**New files:** `tests/conftest.py`, `tests/test_vpin_cte.py`, `tests/test_categories.py`, `tests/test_vpin_signal.py`, `tests/test_mispricing.py`
+
+### What's covered
+
+- **VPIN math (6 tests):** balanced→low VPIN, imbalanced→VPIN=1.0, signed flow polarity, window ramp, bucket assignment
+- **Categories (8 tests):** known tickers (Sports, Politics, Crypto), unknown/None/empty→"Other", hierarchy 3-tuple, GROUP_COLORS coverage
+- **Signal analysis (4 tests):** first-half truncation, MIN_MARKETS guard, FDR key presence, FDR values >= raw
+- **Mispricing model (4 tests):** log_volume formula, temporal split monotonicity, shared bin edges, extrapolated price→zero adj
+
+### Also fixed
+
+- `get_hierarchy(None)` crashed with `AttributeError`. Added null guard to return `("Other", "Other", "")`.
+- Added `[tool.pytest.ini_options] pythonpath = ["."]` to `pyproject.toml` so pytest can find `src.*` imports.
+
+### Notes for future sessions
+
+All tests use synthetic data — no real data files needed. Run with `uv run pytest tests/ -v`.
+
+---
+
+## 2026-02-12: Notebook imports from src/ instead of inline code
+
+**File:** `notebooks/vpin_analysis.ipynb`
+
+### Problem
+
+The notebook duplicated `vpin_cte()`, `MIN_TRADES`, `get_group()`, `GROUP_COLORS`, and the full CTE chain from `src/`. It also had two bugs that `src/` already fixed:
+1. `log_volume` used `groupby().transform('sum')` on lifetime total volume (data leakage — Step 2 bug)
+2. `pd.cut` computed separate bin edges for train and test sets (bin-edge leakage — Step 3 bug)
+
+### Fix
+
+1. Added setup cell with `sys.path.insert(0, _repo_root)` — hardened with validation that `src/analysis/util/vpin.py` exists before trusting the path.
+2. Replaced inline `vpin_cte` and `MIN_TRADES` with `from src.analysis.util.vpin import vpin_cte, MIN_TRADES, qualified_trades_cte`.
+3. Replaced inline CTE chain with `qualified_trades_cte(...)`.
+4. Replaced inline `CATEGORY_PATTERNS`, `get_group`, and `GROUP_COLORS` with `from src.analysis.util.categories import get_group, GROUP_COLORS`. Note: `src/` has 568 patterns vs notebook's 60, so some "Other" tickers now get proper group assignments.
+5. Fixed `log_volume`: `np.log1p((mid_df['bucket_id'] + 1) * BUCKET_SIZE)`.
+6. Fixed `pd.cut`: `retbins=True` on training call, passed `bin_edges` to test call.
+
+### Notes for future sessions
+
+Do NOT add `random_state=42` to the `LogisticRegression(max_iter=1000)` calls — `lbfgs` is deterministic. The notebook cell-1 is Colab-specific (downloads 33GB dataset) and cannot be executed locally.
+
+---
+
+## 2026-02-12: Add data validation and error handling
+
+**Files:** `src/common/analysis.py`, `src/analysis/kalshi/vpin_signal.py`, `src/analysis/kalshi/mispricing_model.py`, `src/analysis/kalshi/vpin_categories.py`, `src/indexers/kalshi/trades.py`
+
+### Problem
+
+1. Analyses could silently produce empty DataFrames without any error — downstream consumers (CSV save, figure generation) would get cryptic failures.
+2. `mispricing_model.py` had a `if vpin_df.empty: return pd.DataFrame()` guard that silently returned empty output instead of failing loudly.
+3. `trades.py` had `except Exception: pass` that swallowed all errors during dedup loading.
+
+### Fix
+
+Two-layer validation (defense in depth):
+
+1. **Safety net in `save()`:** After `self.run()`, raises `ValueError` if `output.data` is an empty DataFrame. Catches all 26 Analysis subclasses universally. `data=None` (legitimate — no tabular output) is fine; `data=pd.DataFrame()` with 0 rows is almost certainly a bug.
+
+2. **`_require_data()` method on `Analysis`:** Called after major DuckDB queries in each VPIN analysis. Provides precise error messages with context (which query failed, how many rows returned, minimum expected).
+
+3. **Removed silent empty guard** from `mispricing_model.py:_extract_features` — the `save()` safety net now catches this.
+
+4. **Fixed `except Exception: pass`** in `trades.py` — now logs a warning with the exception message.
+
+### Notes for future sessions
+
+When adding new Analysis subclasses, call `self._require_data()` after major DuckDB queries for precise error messages. The `save()` safety net catches empty output regardless, but `_require_data` gives better diagnostics.
+
+---
+
+## 2026-02-12: Extract shared market filtering CTE
+
+**Files:** `src/analysis/util/vpin.py`, `src/analysis/kalshi/vpin_signal.py`, `src/analysis/kalshi/mispricing_model.py`, `src/analysis/kalshi/vpin_categories.py`
+
+### Problem
+
+Three files duplicated the same `market_info → qualified_markets → trades` CTE chain (~15 lines each). Divergence risk: any fix to market filtering logic would need to be applied in 3 places.
+
+### Fix
+
+Added `qualified_trades_cte(trades_dir, markets_dir)` to `src/analysis/util/vpin.py`. All three consumer files now call this shared function. Also removed the redundant `INNER JOIN trade_counts tc` from `mispricing_model.py`'s final SELECT — structurally redundant since `trades` already filters through `qualified_markets`.
+
+### Design decisions
+
+- **Superset columns in market_info:** Always selects `ticker, event_ticker, result, close_time` even when a consumer doesn't need all of them. DuckDB inlines CTEs and the optimizer removes unused columns, so no performance cost.
+- **trade_counts JOIN removal:** The original `mispricing_model.py` joined `vpin_series` with `trade_counts` in the final SELECT. Since `vpin_series` is built from `trades`, which already filters through `qualified_markets`, every ticker in `vpin_series` is guaranteed to be in `qualified_markets`. The join was structurally redundant.
+
+### Verification
+
+Output diffs: vpin_signal and vpin_categories show only floating-point noise (15th+ decimal place). mispricing_model shows small variations from sort-stability in temporal split (pre-existing, not introduced by refactor). Market counts identical (60 train, 26 test).
+
+---
+
+## 2026-02-12: Add Benjamini-Hochberg FDR correction to regression p-values
+
+**File:** `src/analysis/kalshi/vpin_signal.py`
+
+### Problem
+
+`vpin_signal.py` runs 6 regression tests (3 volatility horizons k=1,5,10, 3 direction horizons) and reports raw p-values. Without multiple comparison correction, the family-wise error rate is 1-(1-0.05)^6 ≈ 26%. Readers seeing six tests with p<0.05 may overestimate the evidence.
+
+### Fix
+
+Added `_apply_fdr_correction()` method using `scipy.stats.false_discovery_control(method="bh")`. Called after all regression tests in `run()`. Both raw and FDR-corrected p-values appear in CSV output. Figure stars now use FDR-corrected p-values.
+
+### Design decisions
+
+- **BH (not BY):** Our tests have positive regression dependency (different horizons on the same data), and BH is valid under PRDS (positive regression dependency on a subset). BY would be overly conservative here.
+- **Stars reflect FDR:** Raw stars mislead readers — corrected stars reflect honest significance after accounting for multiple testing. Raw p-values remain in CSV for transparency.
+
+### Results after correction
+
+| Test | Raw p | FDR p | Significant? |
+|------|-------|-------|-------------|
+| vol_k1 | 0.009 | 0.019 | Yes * |
+| vol_k5 | 0.001 | 0.003 | Yes ** |
+| vol_k10 | 2.6e-7 | 1.5e-6 | Yes *** |
+| dir_k1 | 0.063 | 0.063 | No |
+| dir_k5 | 0.050 | 0.060 | No (flipped) |
+| dir_k10 | 0.032 | 0.048 | Yes * |
+
+All 3 volatility results survive. Direction k5 flips non-significant (FDR=0.060). Direction k10 barely survives.
+
+### Notes for future sessions
+
+If new regression tests are added (e.g., testing additional horizons or features), regenerate FDR corrections — they depend on the total number of tests in the family.
+
+---
+
+## 2025-02-12: Fix `pd.cut` bin-edge leakage in longshot adjustment
+
+**File:** `src/analysis/kalshi/mispricing_model.py` (`_compute_longshot_adj`)
+
+### Problem
+
+`pd.cut(bins=20)` computes 20 evenly-spaced edges from the series' own `(min, max)`. The method called it independently on train and test sets, producing different bin edges. When test bin indices looked up `adj_map` (keyed by training bin indices), they got adjustments computed for a different price interval.
+
+Example: train range [2, 97] → bin 0 covers [2, 6.75]. Test range [5, 95] → bin 0 covers [5, 9.5]. A test price of 8 falls in test-bin 0, but `adj_map[0]` holds the adjustment for train prices in [2, 6.75].
+
+`longshot_adj` has a coefficient of ~2.4, making it the third-strongest feature in Model 2. Misaligned bin lookups injected noise into this feature for every test observation.
+
+### Fix
+
+Used `retbins=True` on the training call to capture bin edges, then passed those edges to the test call:
+
+```python
+train_df["price_bin"], bin_edges = pd.cut(train_df["price"], bins=20, labels=False, retbins=True)
+# ...
+test_df["price_bin"] = pd.cut(test_df["price"], bins=bin_edges, labels=False)
+```
+
+Test prices outside the training range get `NaN` bins, which `.map(adj_map).fillna(0)` already handles — no longshot adjustment for extrapolated prices.
+
+### Also: removed dead `random_state=42` from `vpin_signal.py`
+
+The original Step 3 plan was to add `random_state=42` to two `LogisticRegression` calls in `mispricing_model.py`. Investigation showed this is a no-op — `random_state` is ignored by `lbfgs` (the default and only solver used). The pipeline is already fully deterministic. Instead of adding misleading dead code, removed the one existing `random_state=42` from `vpin_signal.py` (line 215) that was introduced in Step 1.
+
+---
+
 ## 2025-02-12: Fix `log_volume` data leakage in mispricing model
 
 **File:** `src/analysis/kalshi/mispricing_model.py` (`_extract_features`)

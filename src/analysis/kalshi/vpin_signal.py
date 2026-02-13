@@ -21,12 +21,13 @@ import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
 from scipy import stats
+from scipy.stats import false_discovery_control
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from src.analysis.util.vpin import MIN_TRADES, vpin_cte
+from src.analysis.util.vpin import MIN_TRADES, qualified_trades_cte, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
 from src.common.interfaces.chart import ChartConfig, ChartType, UnitType
 
@@ -59,6 +60,8 @@ class VPINSignalAnalysis(Analysis):
         with self.progress("Computing VPIN across all qualified markets"):
             vpin_df = self._compute_vpin(con)
 
+        self._require_data(vpin_df, "VPIN computation")
+
         results: dict[str, Any] = {}
 
         with self.progress("Testing volatility prediction"):
@@ -72,6 +75,8 @@ class VPINSignalAnalysis(Analysis):
         with self.progress("Testing resolution prediction"):
             res_results = self._test_resolution_prediction(vpin_df)
             results["resolution"] = res_results
+
+        self._apply_fdr_correction(results)
 
         fig = self._create_figure(vpin_df, vol_quintiles, results)
         chart = self._create_chart(vol_quintiles)
@@ -87,23 +92,7 @@ class VPINSignalAnalysis(Analysis):
         """Load trades, filter to qualifying markets, compute VPIN series."""
         return con.execute(
             f"""
-            WITH market_info AS (
-                SELECT ticker, result, event_ticker, close_time
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized' AND result IN ('yes', 'no')
-            ),
-            qualified_markets AS (
-                SELECT m.ticker
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN market_info m ON t.ticker = m.ticker
-                GROUP BY m.ticker
-                HAVING SUM(t.count) >= {MIN_TRADES}
-            ),
-            trades AS (
-                SELECT t.ticker, t.count, t.taker_side, t.yes_price, t.created_time
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN qualified_markets q ON t.ticker = q.ticker
-            ),
+            WITH {qualified_trades_cte(self.trades_dir, self.markets_dir)},
             {vpin_cte("trades", self.bucket_size, self.lookback)}
             SELECT
                 vs.*,
@@ -212,7 +201,7 @@ class VPINSignalAnalysis(Analysis):
 
         pipe = Pipeline([
             ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=1000, solver="lbfgs", random_state=42)),
+            ("clf", LogisticRegression(max_iter=1000, solver="lbfgs")),
         ])
         model_probs = cross_val_predict(
             pipe, features, target, cv=5, method="predict_proba"
@@ -239,6 +228,25 @@ class VPINSignalAnalysis(Analysis):
             "coef_vpin": float(model.coef_[0][1] / scaler.scale_[1]),
             "coef_signed_flow": float(model.coef_[0][2] / scaler.scale_[2]),
         }
+
+    def _apply_fdr_correction(self, results: dict[str, Any]) -> None:
+        """Apply Benjamini-Hochberg FDR correction across all regression p-values."""
+        pvalue_keys = []
+        for test_name in ("volatility", "direction"):
+            test_results = results.get(test_name, {})
+            for key in test_results:
+                if "pvalue" in key:
+                    pvalue_keys.append((test_name, key))
+
+        if len(pvalue_keys) < 2:
+            return
+
+        raw_pvals = [results[t][k] for t, k in pvalue_keys]
+        adjusted = false_discovery_control(raw_pvals, method="bh")
+
+        for (test_name, key), adj_p in zip(pvalue_keys, adjusted):
+            fdr_key = key.replace("pvalue", "pvalue_fdr")
+            results[test_name][fdr_key] = float(adj_p)
 
     def _create_figure(
         self,
@@ -298,7 +306,7 @@ class VPINSignalAnalysis(Analysis):
         vol = results.get("volatility", {})
         for k in [1, 5, 10]:
             beta = vol.get(f"vol_beta_k{k}")
-            pval = vol.get(f"vol_pvalue_k{k}")
+            pval = vol.get(f"vol_pvalue_fdr_k{k}", vol.get(f"vol_pvalue_k{k}"))
             r2 = vol.get(f"vol_r2_k{k}")
             if beta is not None:
                 sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else ""
@@ -307,7 +315,7 @@ class VPINSignalAnalysis(Analysis):
         dir_r = results.get("direction", {})
         for k in [1, 5, 10]:
             beta = dir_r.get(f"dir_beta_k{k}")
-            pval = dir_r.get(f"dir_pvalue_k{k}")
+            pval = dir_r.get(f"dir_pvalue_fdr_k{k}", dir_r.get(f"dir_pvalue_k{k}"))
             r2 = dir_r.get(f"dir_r2_k{k}")
             if beta is not None:
                 sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else ""

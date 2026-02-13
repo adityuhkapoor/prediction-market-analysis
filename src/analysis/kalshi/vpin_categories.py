@@ -16,7 +16,7 @@ import pandas as pd
 from scipy import stats
 
 from src.analysis.util.categories import CATEGORY_SQL, GROUP_COLORS, get_group
-from src.analysis.util.vpin import MIN_TRADES, vpin_cte
+from src.analysis.util.vpin import qualified_trades_cte, vpin_cte
 from src.common.analysis import Analysis, AnalysisOutput
 from src.common.interfaces.chart import ChartConfig, ChartType
 
@@ -47,6 +47,8 @@ class VPINCategoriesAnalysis(Analysis):
         with self.progress("Computing VPIN by category"):
             vpin_df = self._load_vpin_with_categories(con)
 
+        self._require_data(vpin_df, "VPIN with categories")
+
         with self.progress("Computing per-category statistics"):
             group_df = self._compute_category_stats(vpin_df)
 
@@ -61,23 +63,7 @@ class VPINCategoriesAnalysis(Analysis):
     def _load_vpin_with_categories(self, con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         df = con.execute(
             f"""
-            WITH market_info AS (
-                SELECT ticker, event_ticker, result
-                FROM '{self.markets_dir}/*.parquet'
-                WHERE status = 'finalized' AND result IN ('yes', 'no')
-            ),
-            qualified_markets AS (
-                SELECT m.ticker
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN market_info m ON t.ticker = m.ticker
-                GROUP BY m.ticker
-                HAVING SUM(t.count) >= {MIN_TRADES}
-            ),
-            trades AS (
-                SELECT t.ticker, t.count, t.taker_side, t.yes_price, t.created_time
-                FROM '{self.trades_dir}/*.parquet' t
-                INNER JOIN qualified_markets q ON t.ticker = q.ticker
-            ),
+            WITH {qualified_trades_cte(self.trades_dir, self.markets_dir)},
             {vpin_cte("trades", self.bucket_size, self.lookback)}
             SELECT
                 vs.*,

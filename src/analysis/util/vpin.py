@@ -11,6 +11,45 @@ for prediction markets with exact taker_side classification.
 MIN_TRADES = 500
 
 
+def qualified_trades_cte(
+    trades_dir: str,
+    markets_dir: str,
+    min_trades: int = MIN_TRADES,
+) -> str:
+    """DuckDB CTEs that filter to finalized markets with sufficient trade volume.
+
+    Produces three CTEs:
+        market_info  — finalized yes/no markets
+        qualified_markets — tickers with >= min_trades total trades
+        trades — trade rows for qualified markets only
+
+    Usage::
+
+        f\"\"\"
+        WITH {qualified_trades_cte(trades_dir, markets_dir)},
+        {vpin_cte("trades", bucket_size, lookback)}
+        SELECT ...
+        \"\"\"
+    """
+    return f"""market_info AS (
+        SELECT ticker, event_ticker, result, close_time
+        FROM '{markets_dir}/*.parquet'
+        WHERE status = 'finalized' AND result IN ('yes', 'no')
+    ),
+    qualified_markets AS (
+        SELECT m.ticker
+        FROM '{trades_dir}/*.parquet' t
+        INNER JOIN market_info m ON t.ticker = m.ticker
+        GROUP BY m.ticker
+        HAVING SUM(t.count) >= {min_trades}
+    ),
+    trades AS (
+        SELECT t.ticker, t.count, t.taker_side, t.yes_price, t.created_time
+        FROM '{trades_dir}/*.parquet' t
+        INNER JOIN qualified_markets q ON t.ticker = q.ticker
+    )"""
+
+
 def vpin_cte(
     trades_table: str,
     bucket_size: int = 200,
@@ -24,7 +63,7 @@ def vpin_cte(
     Produces a ``vpin_series`` CTE with columns:
         ticker, bucket_id, v_yes, v_no, total_vol, avg_price,
         bucket_start, bucket_end, order_imbalance, vpin, signed_flow,
-        window_size
+        window_size, delta_vpin
 
     Usage::
 
@@ -61,7 +100,7 @@ def vpin_cte(
         FROM volume_buckets
         GROUP BY ticker, bucket_id
     ),
-    vpin_series AS (
+    vpin_raw AS (
         SELECT
             ticker,
             bucket_id,
@@ -80,4 +119,10 @@ def vpin_cte(
             PARTITION BY ticker ORDER BY bucket_id
             ROWS BETWEEN {lookback - 1} PRECEDING AND CURRENT ROW
         )
+    ),
+    vpin_series AS (
+        SELECT
+            *,
+            vpin - LAG(vpin) OVER (PARTITION BY ticker ORDER BY bucket_id) AS delta_vpin
+        FROM vpin_raw
     )"""

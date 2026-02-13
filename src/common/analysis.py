@@ -85,6 +85,14 @@ class Analysis(ABC):
             yield
             pbar.update()
 
+    def _require_data(self, df: pd.DataFrame, context: str, min_rows: int = 1) -> None:
+        """Raise if a query returned insufficient data."""
+        n = len(df) if df is not None else 0
+        if n < min_rows:
+            raise ValueError(
+                f"{self.name}: {context} returned {n} rows (need >= {min_rows})"
+            )
+
     @abstractmethod
     def run(self) -> AnalysisOutput:
         """Execute the analysis and return outputs.
@@ -118,6 +126,12 @@ class Analysis(ABC):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         output = self.run()
+
+        if output.data is not None and output.data.empty:
+            raise ValueError(
+                f"{self.name}: analysis produced empty data — check input files"
+            )
+
         saved: dict[str, Path] = {}
 
         # Save figure formats
