@@ -28,3 +28,5 @@ fig
 *.tar.zst
 output
 .tmp
+.claude/
+.vscode/

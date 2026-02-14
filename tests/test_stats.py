@@ -1,7 +1,4 @@
-"""Tests for statistical test functions used in VPIN insider trading analysis.
-
-Each test verifies against known values from scipy or analytical solutions.
-"""
+"""Tests for statistical test wrappers against scipy/analytical values."""
 
 import numpy as np
 from scipy import stats as sp_stats
@@ -14,8 +11,6 @@ from src.analysis.util.stats import (
     mann_whitney_test,
     permutation_test,
 )
-
-# ── KS test ──────────────────────────────────────────────────────────────
 
 
 def test_ks_matches_scipy():
@@ -42,12 +37,7 @@ def test_ks_identical_distributions_not_significant():
 
 
 def test_ks_greater_alternative():
-    """KS 'greater' tests F(x) > G(x) — a has more mass below x (stochastically smaller).
-
-    scipy convention: alternative='greater' → D+ = max(F_a(x) - F_b(x))
-    F_a(x) > F_b(x) means a's CDF is above b's → a is stochastically SMALLER.
-    So when a is shifted LEFT, alternative='greater' detects it.
-    """
+    """alternative='greater' detects a stochastically smaller than b."""
     rng = np.random.default_rng(42)
     a = rng.normal(0, 1, size=300)  # Shifted left (stochastically smaller)
     b = rng.normal(2, 1, size=300)
@@ -58,11 +48,7 @@ def test_ks_greater_alternative():
 
 
 def test_ks_less_detects_stochastically_larger():
-    """KS 'less' tests F(x) < G(x) — a has less mass below x (stochastically larger).
-
-    When insider VPIN is stochastically larger than non-insider VPIN,
-    use alternative='less' (F_insider < F_non-insider).
-    """
+    """alternative='less' detects a stochastically larger than b."""
     rng = np.random.default_rng(42)
     a = rng.normal(2, 1, size=300)  # Shifted right (stochastically larger)
     b = rng.normal(0, 1, size=300)
@@ -70,8 +56,6 @@ def test_ks_less_detects_stochastically_larger():
     result = ks_test(a, b, alternative="less")
     assert result.significant, f"Should detect a > b: D={result.statistic}, p={result.pvalue}"
 
-
-# ── Mann-Whitney ─────────────────────────────────────────────────────────
 
 
 def test_mann_whitney_matches_scipy():
@@ -86,8 +70,6 @@ def test_mann_whitney_matches_scipy():
     assert abs(our_result.statistic - scipy_result.statistic) < 1e-10
     assert abs(our_result.pvalue - scipy_result.pvalue) < 1e-10
 
-
-# ── Permutation test ─────────────────────────────────────────────────────
 
 
 def test_permutation_identical_distributions_uniform_p():
@@ -128,8 +110,6 @@ def test_permutation_null_distribution_shape():
     assert len(result.null_distribution) == 500
 
 
-# ── Binomial test ────────────────────────────────────────────────────────
-
 
 def test_binomial_7_of_10():
     """7/10 hits vs p0=0.5 should give p ~ 0.172 (one-sided greater)."""
@@ -154,8 +134,6 @@ def test_binomial_cohen_h():
     )
     assert abs(result.cohen_h - 0.4115) < 0.01, f"Cohen's h ~ 0.41, got {result.cohen_h}"
 
-
-# ── Bootstrap peak lag ───────────────────────────────────────────────────
 
 
 def test_bootstrap_peak_lag_known_signal():
@@ -182,8 +160,6 @@ def test_bootstrap_peak_lag_returns_ci():
     result = bootstrap_peak_lag(x, y, max_lag=10, n_bootstrap=200, seed=42)
     assert result.ci_lower <= result.ci_upper
 
-
-# ── BH-FDR correction ───────────────────────────────────────────────────
 
 
 def test_bh_fdr_two_significant():

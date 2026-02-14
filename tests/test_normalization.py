@@ -1,8 +1,4 @@
-"""Tests for platform-specific normalization CTEs.
-
-Verifies that both Kalshi and Polymarket normalizations produce the common
-schema expected by vpin_cte() and yield correct VPIN values.
-"""
+"""Tests for platform-specific normalization CTEs."""
 
 import duckdb
 import numpy as np
@@ -20,8 +16,6 @@ from src.analysis.util.vpin import vpin_cte
 def con():
     return duckdb.connect()
 
-
-# ── Kalshi normalization ─────────────────────────────────────────────────
 
 
 def _make_kalshi_trades(n=2000, bias=0.5, seed=42):
@@ -74,12 +68,9 @@ def test_kalshi_normalization_produces_identical_vpin(con):
     )
 
 
-# ── Polymarket normalization ─────────────────────────────────────────────
-
 
 @pytest.fixture
 def polymarket_setup(con):
-    """Set up synthetic Polymarket tables: trades, blocks, markets."""
     n = 100
     rng = np.random.default_rng(42)
 
@@ -245,8 +236,6 @@ def test_polymarket_no_token_trade(con):
     # Sell NO tokens → taker_side = 'yes'
     assert result["taker_side"].iloc[1] == "yes"
 
-
-# ── delta_vpin backward compatibility ────────────────────────────────────
 
 
 def test_delta_vpin_exists_and_null_for_first_bucket(con):

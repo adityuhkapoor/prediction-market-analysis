@@ -4,7 +4,7 @@ from src.analysis.util.vpin import vpin_cte
 
 
 def _run_vpin(con, trades_df, bucket_size=200, lookback=10):
-    """Register trades DataFrame and execute VPIN CTE, return full-window rows."""
+    """Execute VPIN CTE and return full-window rows."""
     con.register("trades", trades_df)
     return con.execute(
         f"""

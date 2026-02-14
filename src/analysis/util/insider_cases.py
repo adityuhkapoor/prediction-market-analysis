@@ -1,9 +1,4 @@
-"""Registry of confirmed insider trading cases on Polymarket.
-
-Each case has criminal charges, investigative documentation, or statistical
-impossibility as evidence. Used in Phase 1 validation to test whether VPIN
-can detect known insider activity.
-"""
+"""Registry of confirmed insider trading cases on Polymarket."""
 
 from __future__ import annotations
 
@@ -13,35 +8,20 @@ from datetime import datetime, timezone
 
 @dataclass(frozen=True)
 class InsiderCase:
-    """A confirmed or strongly suspected insider trading case."""
-
     case_id: str
     platform: str
     description: str
-
-    # Market identifiers
     market_slug: str
     condition_id: str = ""
-
-    # Insider metadata
     insider_alias: str = ""
     insider_wallet: str | None = None
     profit_usd: float = 0.0
-    evidence_strength: str = "strong"  # 'strong', 'moderate', 'circumstantial'
-
-    # Timing — when insider was active (UTC)
-    # If unknown, set to None and use market-level analysis with percentage-based windows
+    evidence_strength: str = "strong"
     insider_window_start: datetime | None = None
     insider_window_end: datetime | None = None
-
-    # Market resolution
     resolution_time: datetime | None = None
     resolved_outcome: str = ""
-
-    # Evidence / sourcing
     source_urls: tuple[str, ...] = field(default_factory=tuple)
-
-    # Polymarket token IDs (YES, NO) — needed for side derivation
     yes_token_id: str = ""
     no_token_id: str = ""
 
@@ -49,8 +29,6 @@ class InsiderCase:
 def _utc(year: int, month: int, day: int, hour: int = 0) -> datetime:
     return datetime(year, month, day, hour, tzinfo=timezone.utc)
 
-
-# ── Confirmed insider cases ─────────────────────────────────────────────
 
 CASES: dict[str, InsiderCase] = {}
 

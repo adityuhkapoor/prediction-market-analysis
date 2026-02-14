@@ -1,9 +1,4 @@
-"""Reusable statistical test functions for VPIN insider trading analysis.
-
-All functions return structured results (named tuples or dataclasses) with
-p-values, effect sizes, and test metadata. Designed to be collected and
-passed to ``apply_bh_fdr()`` for multiple testing correction.
-"""
+"""Statistical tests with typed results and BH-FDR correction."""
 
 from __future__ import annotations
 
@@ -14,8 +9,6 @@ import numpy as np
 from numpy.typing import ArrayLike
 from scipy import stats as sp_stats
 from scipy.stats import false_discovery_control
-
-# ── Result types ─────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -61,29 +54,13 @@ class FDRResult:
     significant_mask: np.ndarray
 
 
-# ── Test implementations ─────────────────────────────────────────────────
-
-
 def ks_test(
     sample_a: ArrayLike,
     sample_b: ArrayLike,
     alpha: float = 0.05,
     alternative: str = "greater",
 ) -> KSResult:
-    """Two-sample Kolmogorov-Smirnov test.
-
-    Tests whether sample_a is stochastically greater than sample_b
-    (default alternative='greater').
-
-    Args:
-        sample_a: Test sample (e.g., insider-active VPIN).
-        sample_b: Reference sample (e.g., non-insider VPIN).
-        alpha: Significance level.
-        alternative: 'two-sided', 'less', or 'greater'.
-
-    Returns:
-        KSResult with D statistic, p-value, and significance flag.
-    """
+    """Two-sample KS test. Default alternative='greater' tests a stochastically > b."""
     a = np.asarray(sample_a, dtype=float)
     b = np.asarray(sample_b, dtype=float)
     result = sp_stats.ks_2samp(a, b, alternative=alternative)
@@ -100,17 +77,7 @@ def mann_whitney_test(
     alpha: float = 0.05,
     alternative: str = "greater",
 ) -> MannWhitneyResult:
-    """Mann-Whitney U test for comparing two independent samples.
-
-    Args:
-        sample_a: Test sample.
-        sample_b: Reference sample.
-        alpha: Significance level.
-        alternative: 'two-sided', 'less', or 'greater'.
-
-    Returns:
-        MannWhitneyResult with U statistic, p-value, and significance flag.
-    """
+    """Mann-Whitney U test."""
     a = np.asarray(sample_a, dtype=float)
     b = np.asarray(sample_b, dtype=float)
     result = sp_stats.mannwhitneyu(a, b, alternative=alternative)
@@ -128,21 +95,7 @@ def permutation_test(
     n_permutations: int = 10_000,
     seed: int = 42,
 ) -> PermutationResult:
-    """Permutation test comparing two samples.
-
-    Shuffles the combined pool and recomputes the test statistic to build
-    an exact null distribution.
-
-    Args:
-        sample_a: Test sample.
-        sample_b: Reference sample.
-        stat_fn: Function(a, b) → scalar. Defaults to difference of means.
-        n_permutations: Number of permutation iterations.
-        seed: RNG seed for reproducibility.
-
-    Returns:
-        PermutationResult with observed statistic, p-value, and null distribution.
-    """
+    """Permutation test. Defaults to difference of means. One-sided p-value."""
     a = np.asarray(sample_a, dtype=float)
     b = np.asarray(sample_b, dtype=float)
 
@@ -163,7 +116,6 @@ def permutation_test(
         rng.shuffle(combined)
         null_dist[i] = stat_fn(combined[:n_a], combined[n_a:])
 
-    # One-sided p-value: proportion of null >= observed
     pvalue = float(np.mean(null_dist >= observed))
 
     return PermutationResult(
@@ -178,20 +130,9 @@ def binomial_test(
     trials: int,
     p0: float = 0.5,
 ) -> BinomialResult:
-    """Binomial test for hit rate against a null probability.
-
-    Args:
-        hits: Number of successes.
-        trials: Total number of trials.
-        p0: Null hypothesis probability.
-
-    Returns:
-        BinomialResult with p-value, Cohen's h effect size, and hit rate.
-    """
+    """One-sided binomial test (greater) with Cohen's h effect size."""
     result = sp_stats.binomtest(hits, trials, p0, alternative="greater")
     hit_rate = hits / trials if trials > 0 else 0.0
-
-    # Cohen's h: 2 * arcsin(sqrt(p1)) - 2 * arcsin(sqrt(p0))
     cohen_h = 2 * asin(sqrt(hit_rate)) - 2 * asin(sqrt(p0))
 
     return BinomialResult(
@@ -210,22 +151,7 @@ def bootstrap_peak_lag(
     n_bootstrap: int = 1_000,
     seed: int = 42,
 ) -> BootstrapPeakLagResult:
-    """Find peak lag in cross-correlation and bootstrap a confidence interval.
-
-    Computes the cross-correlation between x and y at lags -max_lag to +max_lag,
-    finds the lag with maximum absolute correlation, then bootstraps to get
-    a CI for the peak lag location.
-
-    Args:
-        x: First time series (e.g., VPIN).
-        y: Second time series (e.g., price volatility).
-        max_lag: Maximum lag to consider in both directions.
-        n_bootstrap: Number of bootstrap iterations.
-        seed: RNG seed.
-
-    Returns:
-        BootstrapPeakLagResult with peak lag and 95% CI bounds.
-    """
+    """Peak lag in cross-correlation with bootstrapped 95% CI."""
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
 
@@ -236,7 +162,7 @@ def bootstrap_peak_lag(
     def _peak_lag(x_series, y_series):
         correlations = []
         m = len(x_series)
-        effective_max_lag = min(max_lag, m - 3)  # Need at least 3 points after shifting
+        effective_max_lag = min(max_lag, m - 3)
         if effective_max_lag < 1:
             return 0
         for lag in range(-effective_max_lag, effective_max_lag + 1):
@@ -281,17 +207,7 @@ def apply_bh_fdr(
     pvalues: ArrayLike,
     q: float = 0.10,
 ) -> FDRResult:
-    """Apply Benjamini-Hochberg FDR correction.
-
-    Uses scipy's ``false_discovery_control`` which implements the BH procedure.
-
-    Args:
-        pvalues: Array of raw p-values.
-        q: Target false discovery rate.
-
-    Returns:
-        FDRResult with adjusted p-values and boolean significance mask.
-    """
+    """Benjamini-Hochberg FDR correction."""
     pvals = np.asarray(pvalues, dtype=float)
 
     if len(pvals) == 0:
@@ -300,7 +216,6 @@ def apply_bh_fdr(
             significant_mask=np.array([], dtype=bool),
         )
 
-    # scipy's false_discovery_control returns adjusted p-values
     adjusted = false_discovery_control(pvals, method="bh")
 
     return FDRResult(

@@ -1,13 +1,6 @@
-"""VPIN (Volume-Synchronized Probability of Informed Trading) computation.
+"""VPIN computation as composable DuckDB CTEs (Easley, Lopez de Prado, O'Hara 2012)."""
 
-Provides composable DuckDB CTEs for computing VPIN from trade data,
-following the Easley, Lopez de Prado, O'Hara (2012) methodology adapted
-for prediction markets with exact taker_side classification.
-"""
-
-# Minimum trades for a market to produce meaningful VPIN.
-# With bucket_size=200 and lookback=10, this guarantees at least 2 complete
-# VPIN windows per qualifying market.
+# Ensures ≥2 full VPIN windows with bucket_size=200, lookback=10
 MIN_TRADES = 500
 
 
@@ -16,12 +9,9 @@ def qualified_trades_cte(
     markets_dir: str,
     min_trades: int = MIN_TRADES,
 ) -> str:
-    """DuckDB CTEs that filter to finalized markets with sufficient trade volume.
+    """Filter to finalized markets with sufficient volume.
 
-    Produces three CTEs:
-        market_info  — finalized yes/no markets
-        qualified_markets — tickers with >= min_trades total trades
-        trades — trade rows for qualified markets only
+    Produces CTEs: market_info, qualified_markets, trades.
 
     Usage::
 
@@ -55,25 +45,13 @@ def vpin_cte(
     bucket_size: int = 200,
     lookback: int = 10,
 ) -> str:
-    """DuckDB CTE chain that computes VPIN per market from a trades table.
+    """Compute VPIN per market from a trades table.
 
-    Expects the input table to have columns:
-        ticker, count, taker_side, yes_price, created_time
+    Input columns: ticker, count, taker_side, yes_price, created_time
 
-    Produces a ``vpin_series`` CTE with columns:
-        ticker, bucket_id, v_yes, v_no, total_vol, avg_price,
-        bucket_start, bucket_end, order_imbalance, vpin, signed_flow,
-        window_size, delta_vpin
-
-    Usage::
-
-        WITH trades AS (...),
-        {vpin_cte("trades", bucket_size=200, lookback=10)}
-        SELECT * FROM vpin_series WHERE window_size = 10
-
-    Trades are assigned to buckets by cumulative volume, not split at
-    boundaries. The approximation error is negligible when bucket_size is
-    much larger than individual trade sizes.
+    Output CTE ``vpin_series``: ticker, bucket_id, v_yes, v_no, total_vol,
+    avg_price, bucket_start, bucket_end, order_imbalance, vpin, signed_flow,
+    window_size, delta_vpin
     """
     return f"""volume_running AS (
         SELECT *,

@@ -5,13 +5,11 @@ import pytest
 
 @pytest.fixture
 def con():
-    """In-memory DuckDB connection."""
     return duckdb.connect()
 
 
 @pytest.fixture
 def synthetic_trades():
-    """Factory for minimal synthetic trade data."""
     def _make(n_trades=1000, ticker="TEST-TICKER", bucket_size=200, bias=0.5):
         import numpy as np
         rng = np.random.default_rng(42)
