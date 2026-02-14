@@ -235,19 +235,26 @@ def bootstrap_peak_lag(
 
     def _peak_lag(x_series, y_series):
         correlations = []
-        for lag in range(-max_lag, max_lag + 1):
+        m = len(x_series)
+        effective_max_lag = min(max_lag, m - 3)  # Need at least 3 points after shifting
+        if effective_max_lag < 1:
+            return 0
+        for lag in range(-effective_max_lag, effective_max_lag + 1):
             if lag >= 0:
-                xi = x_series[:n - lag] if lag > 0 else x_series
+                xi = x_series[:m - lag] if lag > 0 else x_series
                 yi = y_series[lag:] if lag > 0 else y_series
             else:
                 xi = x_series[-lag:]
-                yi = y_series[:n + lag]
-            if len(xi) < 3:
+                yi = y_series[:m + lag]
+            if len(xi) < 3 or len(yi) < 3 or len(xi) != len(yi):
+                correlations.append(0.0)
+                continue
+            if np.std(xi) == 0 or np.std(yi) == 0:
                 correlations.append(0.0)
                 continue
             r, _ = sp_stats.pearsonr(xi, yi)
             correlations.append(abs(r) if not np.isnan(r) else 0.0)
-        return range(-max_lag, max_lag + 1).__getitem__(np.argmax(correlations)) if correlations else 0
+        return range(-effective_max_lag, effective_max_lag + 1).__getitem__(np.argmax(correlations)) if correlations else 0
 
     observed_peak = _peak_lag(x, y)
 
