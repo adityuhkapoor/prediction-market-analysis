@@ -116,6 +116,8 @@ When testing "insider VPIN > non-insider VPIN", use `alternative='less'`.
 - BH-FDR for multiple testing (Phase 1: q=0.10, Phase 2: q=0.05)
 - Tests alongside code, not batched at the end
 - Delete unused code completely — no commented-out blocks
+- Never add Co-Authored-By lines to git commits
+- Commit messages: one short subject line, no body unless essential
 
 ## Environment Variables
 
